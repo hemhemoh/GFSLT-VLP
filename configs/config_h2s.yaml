@@ -1,0 +1,16 @@
+name: GFSLT-VLP
+data:
+  train_label_path: ./data/How2Sign/h2s_reduced_train.pickle
+  dev_label_path: ./data/How2Sign/h2s_reduced_val.pickle
+  test_label_path: ./data/How2Sign/h2s_reduced_test.pickle
+  img_path: ./data/How2Sign/
+  max_length: 300
+training:
+  wandb: disabled # online or disabled
+  scale_embedding: False
+model:
+  tokenizer: pretrain_models_en/MBart_trimmed
+  transformer:  pretrain_models_en/MBart_trimmed
+  visual_encoder: pretrain_models_en/mytran
+  sign_proj: True
+

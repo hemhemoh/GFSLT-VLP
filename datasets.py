@@ -16,7 +16,6 @@ import io
 import time
 from vidaug import augmentors as va
 from augmentation import *
-
 from loguru import logger
 from hpman.m import _
 
@@ -67,12 +66,14 @@ class S2T_Dataset(Dataset.Dataset):
         self.training_refurbish = training_refurbish
         
         self.raw_data = utils.load_dataset_file(path)
+        # self.raw_data = {key: value for key, value in self.raw_data.items() if value['imgs_path']}
         self.tokenizer = tokenizer
         self.img_path = config['data']['img_path']
         self.phase = phase
         self.max_length = config['data']['max_length']
         
-        self.list = [key for key,value in self.raw_data.items()]   
+        # self.list = [key for key,value in self.raw_data.items()]
+        self.list = list(self.raw_data.keys())
 
         sometimes = lambda aug: va.Sometimes(0.5, aug) # Used to apply augmentor with 50% probability
         self.seq = va.Sequential([
@@ -94,7 +95,7 @@ class S2T_Dataset(Dataset.Dataset):
             # sometimes(Sharpness(min=0.1, max=2.))
         ])
         # self.seq = SomeOf(self.seq_geo, self.seq_color)
-
+        
     def __len__(self):
         return len(self.raw_data)
     
@@ -103,15 +104,11 @@ class S2T_Dataset(Dataset.Dataset):
         sample = self.raw_data[key]
         tgt_sample = sample['text']
         length = sample['length']
-        
         name_sample = sample['name']
-
         img_sample = self.load_imgs([self.img_path + x for x in sample['imgs_path']])
-        
         return name_sample,img_sample,tgt_sample
     
     def load_imgs(self, paths):
-
         data_transform = transforms.Compose([
                                     transforms.ToTensor(),
                                     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]), 

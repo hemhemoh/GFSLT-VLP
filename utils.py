@@ -295,7 +295,8 @@ def cosine_scheduler_func(base_value, final_value, iters, epochs):
     return schedule(iters)
 
 def load_dataset_file(filename):
-    with gzip.open(filename, "rb") as f:
+    # with gzip.open(filename, "rb") as f:
+    with open(filename, "rb") as f:
         loaded_object = pickle.load(f)
         return loaded_object
 

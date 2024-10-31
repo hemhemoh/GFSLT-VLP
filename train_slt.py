@@ -62,6 +62,9 @@ def get_args_parser():
     parser = argparse.ArgumentParser('Gloss-free Sign Language Translation script', add_help=False)
     parser.add_argument('--batch-size', default=16, type=int)
     parser.add_argument('--epochs', default=80, type=int)
+    parser.add_argument('--grad_accumulation_steps', default=4, type=int,
+                    help='Number of gradient accumulation steps before optimizer step')
+
 
     # * distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
@@ -130,7 +133,7 @@ def get_args_parser():
     parser.add_argument('--no-pin-mem', action='store_false', dest='pin_mem',
                         help='')
     parser.set_defaults(pin_mem=True)
-    parser.add_argument('--config', type=str, default='./configs/config_gloss_free.yaml')
+    parser.add_argument('--config', type=str, default='./configs/config_h2s.yaml')
 
     # *Drop out params
     parser.add_argument('--drop', type=float, default=0.0, metavar='PCT',
@@ -179,33 +182,33 @@ def main(args, config):
 
     train_data = S2T_Dataset(path=config['data']['train_label_path'], tokenizer = tokenizer, config=config, args=args, phase='train')
     print(train_data)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_data,shuffle=True)
+    # train_sampler = torch.utils.data.distributed.DistributedSampler(train_data,shuffle=True)
     train_dataloader = DataLoader(train_data,
                                  batch_size=args.batch_size, 
                                  num_workers=args.num_workers, 
                                  collate_fn=train_data.collate_fn,
-                                 sampler=train_sampler, 
+                                #  sampler=train_sampler, 
                                  pin_memory=args.pin_mem)
     
     
     dev_data = S2T_Dataset(path=config['data']['dev_label_path'], tokenizer = tokenizer, config=config, args=args, phase='val')
     print(dev_data)
-    dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data,shuffle=False)
+    # dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data,shuffle=False)
     dev_dataloader = DataLoader(dev_data,
                                  batch_size=args.batch_size,
                                  num_workers=args.num_workers, 
                                  collate_fn=dev_data.collate_fn,
-                                 sampler=dev_sampler, 
+                                #  sampler=dev_sampler, 
                                  pin_memory=args.pin_mem)
     
     test_data = S2T_Dataset(path=config['data']['test_label_path'], tokenizer = tokenizer, config=config, args=args, phase='test')
     print(test_data)
-    test_sampler = torch.utils.data.distributed.DistributedSampler(test_data,shuffle=False)
+    # test_sampler = torch.utils.data.distributed.DistributedSampler(test_data,shuffle=False)
     test_dataloader = DataLoader(test_data,
                                  batch_size=args.batch_size,
                                  num_workers=args.num_workers, 
                                  collate_fn=test_data.collate_fn,
-                                 sampler=test_sampler, 
+                                #  sampler=test_sampler, 
                                  pin_memory=args.pin_mem)
     
     print(f"Creating model:")
@@ -303,8 +306,8 @@ def main(args, config):
     max_accuracy = 0.0
     for epoch in range(args.start_epoch, args.epochs):
         
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
+        # if args.distributed:
+        #     train_sampler.set_epoch(epoch)
         
         train_stats = train_one_epoch(args, model, criterion, train_dataloader, optimizer, device, epoch, config, loss_scaler, mixup_fn)
         lr_scheduler.step(epoch)
@@ -336,6 +339,10 @@ def main(args, config):
                     }, checkpoint_path)
             
         print(f'Max BELU-4: {max_accuracy:.2f}%')
+        # print(train_stats)  # Check if this is None or missing 'loss'
+        # print(test_stats)   # Check if this is None or missing 'belu4'
+        # print(test_stats.get('belu4'))  # Check if 'belu4' exists
+
         if utils.is_main_process():
             wandb.log({'epoch':epoch+1,'training/train_loss':train_stats['loss'], 'dev/dev_loss':test_stats['loss'], 'dev/Bleu_4':test_stats['belu4'], 'dev/Best_Bleu_4': max_accuracy})
 
@@ -375,16 +382,21 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: nn.CrossEntropyLoss
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     print_freq = 10
 
+    grad_accum_steps = args.grad_accumulation_steps
     for step, (src_input, tgt_input) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-
         out_logits = model(src_input, tgt_input)
         label = tgt_input['input_ids'].reshape(-1)
         logits = out_logits.reshape(-1,out_logits.shape[-1])
         loss = criterion(logits, label.to(device, non_blocking=True))
 
-        optimizer.zero_grad()
+         # Normalize loss by the number of accumulation steps
+        loss = loss / grad_accum_steps
         loss.backward()
-        optimizer.step()
+
+        # Perform optimizer step every grad_accum_steps
+        if (step + 1) % grad_accum_steps == 0:
+            optimizer.step() 
+            optimizer.zero_grad()
 
         loss_value = loss.item()
         if not math.isfinite(loss_value):

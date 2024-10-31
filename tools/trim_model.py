@@ -1,14 +1,9 @@
-
 from transformers import MBartForConditionalGeneration, MBartTokenizer, MBartConfig
-
 from hftrim.ModelTrimmers import MBartTrimmer
-
 import utils
 from hftrim.TokenizerTrimmer import TokenizerTrimmer
 
-
-raw_data = utils.load_dataset_file('data/Phonexi-2014T/labels.train')
-
+raw_data = utils.load_dataset_file('data/How2Sign/how2sign_train.pickle')
 data = []
 
 for key,value in raw_data.items():
@@ -17,8 +12,7 @@ for key,value in raw_data.items():
     data.append(sentence)
     # data.append(gloss.lower())
 
-tokenizer = MBartTokenizer.from_pretrained("facebook/mbart-large-cc25", src_lang="de_DE", tgt_lang="de_DE")
-
+tokenizer = MBartTokenizer.from_pretrained("facebook/mbart-large-cc25", src_lang="en_XX", tgt_lang="en_XX")
 model = MBartForConditionalGeneration.from_pretrained("facebook/mbart-large-cc25")
 configuration = model.config
 
@@ -35,21 +29,16 @@ mt.make_model()
 new_tokenizer = tt.trimmed_tokenizer
 new_model = mt.trimmed_model
 
-new_tokenizer.save_pretrained('pretrain_models/MBart_trimmed')
-new_model.save_pretrained('pretrain_models/MBart_trimmed')
+new_tokenizer.save_pretrained('pretrain_models_en/MBart_trimmed')
+new_model.save_pretrained('pretrain_models_en/MBart_trimmed')
 
 ## mytran_model
-configuration = MBartConfig.from_pretrained('pretrain_models/mytran/config.json')
+configuration = MBartConfig.from_pretrained('pretrain_models_en/mytran/config.json')
 configuration.vocab_size = new_model.config.vocab_size
 mytran_model = MBartForConditionalGeneration._from_config(config=configuration)
 mytran_model.model.shared = new_model.model.shared
 
-mytran_model.save_pretrained('pretrain_models/mytran/')
-
-
-
-
-
+mytran_model.save_pretrained('pretrain_models_en/mytran/')
 
 
 
