@@ -111,15 +111,15 @@ class S2T_Dataset(Dataset.Dataset):
     def load_imgs(self, paths):
         data_transform = transforms.Compose([
                                     transforms.ToTensor(),
-                                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]), 
-                                    ])
+                                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+        
         if len(paths) > self.max_length:
             tmp = sorted(random.sample(range(len(paths)), k=self.max_length))
             new_paths = []
             for i in tmp:
                 new_paths.append(paths[i])
             paths = new_paths
-    
+            
         imgs = torch.zeros(len(paths),3, self.args.input_size,self.args.input_size)
         crop_rect, resize = utils.data_augmentation(resize=(self.args.resize, self.args.resize), crop_size=self.args.input_size, is_train=(self.phase=='train'))
 
@@ -128,6 +128,17 @@ class S2T_Dataset(Dataset.Dataset):
             img = cv2.imread(img_path)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(img)
+            # Initial center crop to 720x720
+            width, height = img.size
+            target_size = 720 #square crop
+            
+            # Center crop to square
+            left = (width - target_size) // 2
+            top = (height - target_size) // 2
+            right = left + target_size
+            bottom = top + target_size
+            
+            img = img.crop((left, top, right, bottom))
             batch_image.append(img)
 
         if self.phase == 'train':

@@ -440,7 +440,8 @@ def data_augmentation(resize=(320, 240), crop_size=224, is_train=True):
     if is_train:
         left, top = np.random.randint(0, resize[0] - crop_size), np.random.randint(0, resize[1] - crop_size)
     else:
-        left, top = (resize[0] - crop_size) // 2, (resize[1] - crop_size) // 2
+        left, top = (resize[0] - crop_size) // 2, (resize[1] - crop_size) 
+        # // 2
 
     return (left, top, left + crop_size, top + crop_size), resize
 
@@ -532,27 +533,34 @@ def loss_fn_kd(outputs, teacher_outputs, T=1.0, alpha=0.5):
             #    F.cross_entropy(outputs, F.softmax(teacher_outputs, dim=1)) * (1. - alpha)
 
     return KD_loss
-
+        
 class NativeScaler:
     state_dict_key = "amp_scaler"
 
-    def __init__(self):
-        self._scaler = torch.cuda.amp.GradScaler()
+    def __init__(self, device='cuda'):
+        try:
+            self._scaler = torch.amp.GradScaler(device=device)
+        except (AttributeError, TypeError) as e:
+            self._scaler = torch.cuda.amp.GradScaler()
 
-    def __call__(self, loss, optimizer, clip_grad=None, clip_mode='norm', parameters=None, create_graph=False):
-        self._scaler.scale(loss).backward(create_graph=create_graph)
-        if clip_grad is not None:
-            assert parameters is not None
-            self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-            dispatch_clip_grad(parameters, clip_grad, mode=clip_mode)
-        self._scaler.step(optimizer)
-        self._scaler.update()
+    def __call__(self, loss, optimizer, clip_grad=None, clip_mode='norm', parameters=None, create_graph=False, need_update=True):  
+        # self._scaler.scale(loss).backward(create_graph=create_graph)
+        #took out the loss.backward pass from here
+        if need_update:
+            if clip_grad is not None:
+                assert parameters is not None
+                self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
+                torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
+                # dispatch_clip_grad(parameters, clip_grad, mode=clip_mode)
+            self._scaler.step(optimizer)
+            self._scaler.update()
 
     def state_dict(self):
         return self._scaler.state_dict()
 
     def load_state_dict(self, state_dict):
-        self._scaler.load_state_dict(state_dict)
+        self._scaler.load_state_dict(state_dict) 
+        
 
 def InputMask(gloss_input_ids, gloss_attention_mask, noise_rate=0.1, is_train=True):
     mask_matrix = torch.ones_like(gloss_attention_mask)
@@ -592,7 +600,7 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
     # torch.backends.cudnn.enabled = False  
 
-def save_dataset_file(path, data):
+def cfile(path, data):
     with gzip.open(path, "w") as f:
         pickle.dump(data,f)
 

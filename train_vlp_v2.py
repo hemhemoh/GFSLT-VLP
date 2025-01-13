@@ -37,7 +37,7 @@ from sacrebleu.metrics import BLEU, CHRF, TER
 # *timm
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
-from timm.utils import NativeScaler
+from utils import NativeScaler
 from timm.loss import SoftTargetCrossEntropy
 from timm.optim import AdamW
 # visualization
@@ -48,10 +48,9 @@ import hpargparse
 # global definition
 from definition import *
 
-
 def get_args_parser():
     parser = argparse.ArgumentParser('Visual-Language-Pretraining (VLP) V2 scripts', add_help=False)
-    parser.add_argument('--batch-size', default=16, type=int)
+    parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--epochs', default=80, type=int)
     parser.add_argument('--grad_accumulation_steps', default=4, type=int,
                     help='Number of gradient accumulation steps before optimizer step')
@@ -75,12 +74,12 @@ def get_args_parser():
                         help='Clip gradient norm (default: None, no clipping)')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
-    parser.add_argument('--weight-decay', type=float, default=0.0,
+    parser.add_argument('--weight-decay', type=float, default=0.2,
                         help='weight decay (default: 0.05)')
-    # * Learning rate schedule parameters
     parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
                         help='LR scheduler (default: "cosine"')
-    parser.add_argument('--lr', type=float, default=1.0e-3, metavar='LR',
+    # tried 2e-4, 5e-4, 3e-4
+    parser.add_argument('--lr', type=float, default=3e-4, metavar='LR',
                         help='learning rate (default: 5e-4)')
     parser.add_argument('--lr-noise', type=float, nargs='+', default=None, metavar='pct, pct',
                         help='learning rate noise on/off epoch percentages')
@@ -92,7 +91,6 @@ def get_args_parser():
                         help='warmup learning rate (default: 1e-6)')
     parser.add_argument('--min-lr', type=float, default=1.0e-08, metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
-    
     parser.add_argument('--decay-epochs', type=float, default=30, metavar='N',
                         help='epoch interval to decay LR')
     parser.add_argument('--warmup-epochs', type=int, default=0, metavar='N',
@@ -203,34 +201,31 @@ def main(args, config):
     model_without_ddp = model
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
     print(f'number of params: {n_parameters}M')
 
     optimizer = create_optimizer(args, model_without_ddp)
     lr_scheduler, _ = create_scheduler(args, optimizer)
-
     text_decoder = Text_Decoder(config).to(device)
 
     if args.distributed:
         text_decoder = torch.nn.parallel.DistributedDataParallel(text_decoder, device_ids=[args.gpu], find_unused_parameters=False)
-    optimizer_td = AdamW(text_decoder.parameters(), lr=1e-3, weight_decay=0, betas=(0.9, 0.98))
-        #text_decoder.module.parameters() for when using distributed training
+    
+    optimizer_td = AdamW(text_decoder.parameters(), lr=2e-3, weight_decay=0.2, betas=(0.9, 0.98))
+        # text_decoder.module.parameters() for when using distributed training changed lr from 1e-3 to 2e-3
     lr_scheduler_td = scheduler.CosineAnnealingLR(
                 optimizer=optimizer_td,
                 eta_min=1e-8,
-                T_max=args.epochs,
-            )
+                T_max=args.epochs,)
     TD_train_dict = dict(
         optimizer = optimizer_td,
         lr_scheduler = lr_scheduler_td,
-        text_decoder = text_decoder
-    )
+        text_decoder = text_decoder)
 
     criterion = utils.KLLoss()
-    loss_scaler = torch.cuda.amp.GradScaler() #changed this from nativescaler because I wanted to have autonomy over loss.backward and optimizer.step()
-
+    loss_scaler = NativeScaler()
     output_dir = Path(args.output_dir)
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
@@ -254,6 +249,7 @@ def main(args, config):
     start_time = time.time()
     min_loss = np.inf
     for epoch in range(args.start_epoch, args.epochs):
+        torch.cuda.empty_cache()
         if args.distributed:
             train_dataloader.sampler.set_epoch(epoch)
         
@@ -325,7 +321,6 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: nn.CrossEntropyLoss
                     device: torch.device, epoch: int, config, PAD_IDX, loss_scaler, TD_train_dict, max_norm: float = 0,
                     set_training_mode=True):
     model.train(set_training_mode)
-
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
@@ -333,43 +328,44 @@ def train_one_epoch(args, model: torch.nn.Module, criterion: nn.CrossEntropyLoss
     loss_img = criterion
     loss_txt = criterion
     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.2)
-
-    grad_accum_steps = args.grad_accumulation_steps
-    
     # Initialize total loss for accumulation
     td_step = 0 
+    accumulated_loss = 0
+    accumulated_td_loss = 0
+    grad_accum_steps = args.grad_accumulation_steps
+    
     for step, (src_input, tgt_input, masked_tgt_input) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         with torch.cuda.amp.autocast():
             logits_per_image, logits_per_text, ground_truth = model(src_input, tgt_input)
             loss_imgs = loss_img(logits_per_image,ground_truth)
             loss_texts = loss_txt(logits_per_text,ground_truth)
-            # print(f"loss_imgs{loss_imgs}, loss_texts{loss_texts}")
-            avg_loss = (loss_imgs + loss_texts)/2
-            # print(f"Total loss before grad accum {total_loss}")
-            total_loss = avg_loss / grad_accum_steps
-            # print(f"Total loss After grad accum {total_loss}")
-            loss_scaler.scale(total_loss).backward()
-
+            total_loss = (loss_imgs + loss_texts) / grad_accum_steps 
+            
+             # Accumulate main loss
+            loss_scaler._scaler.scale(total_loss).backward()
+            accumulated_loss += total_loss.item()
+            
         if ((step + 1) % grad_accum_steps == 0) or (step + 1 == len(data_loader)):
-            # loss_scaler(total_loss, optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_grad)
-            loss_scaler.step(optimizer)  
-            loss_scaler.update()
+            loss_scaler(accumulated_loss, optimizer, clip_grad=args.clip_grad, parameters=model.parameters())
             optimizer.zero_grad()
-
+            accumulated_loss = 0
+            
         # update the text decoder parames
         if step % 5 == 0:
             with torch.cuda.amp.autocast():
                 lm_logits = TD_train_dict['text_decoder'](tgt_input, masked_tgt_input, model.model_txt)
                 masked_lm_loss = loss_fct(lm_logits.view(-1, lm_logits.shape[-1]), tgt_input['input_ids'].cuda().view(-1)) * args.loss_lambda
                 masked_lm_loss = masked_lm_loss / grad_accum_steps
-                loss_scaler.scale(masked_lm_loss).backward()
-            td_step += 1
-            if td_step % grad_accum_steps == 0 or (step + 1 == len(data_loader)):
-                loss_scaler.step(TD_train_dict['optimizer'])  
-                loss_scaler.update()
-                # loss_scaler(masked_lm_loss, TD_train_dict['optimizer'])
+                loss_scaler._scaler.scale(masked_lm_loss).backward()
+                accumulated_td_loss += masked_lm_loss.item()
+                td_step += 1
+                
+            if (td_step + 1) % grad_accum_steps == 0:
+                loss_scaler(accumulated_td_loss, TD_train_dict['optimizer'], clip_grad=args.clip_grad, parameters=TD_train_dict['text_decoder'].parameters())
                 TD_train_dict['optimizer'].zero_grad()
+                accumulated_td_loss = 0
+                
+                
         loss_value = total_loss.item()
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
